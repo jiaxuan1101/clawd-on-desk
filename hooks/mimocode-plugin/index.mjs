@@ -1,23 +1,23 @@
-// Clawd on Desk — opencode Plugin
-// Runs inside the opencode process (Bun runtime) and forwards session/tool
+// Clawd on Desk — mimocode Plugin
+// Runs inside the mimocode process (Bun runtime) and forwards session/tool
 // events to the Clawd HTTP server (127.0.0.1:23333-23337).
 //
 // Design invariants:
 //   - Zero dependencies (Bun's built-in fetch + fs/os/path + Bun.serve + node:crypto)
 //   - fire-and-forget: event hook never awaits the fetch, so slow/broken Clawd
-//     cannot stall opencode
+//     cannot stall mimocode
 //   - same-state dedup — consecutive identical states skip POST
 //   - self-healing port discovery: cache hit skips I/O; on miss we read
 //     runtime.json, then fall back to a full SERVER_PORTS scan
 //
 // Phase 2 bridge (permission replies):
-//   opencode TUI does NOT bind an external HTTP listener (verified via
+//   mimocode TUI does NOT bind an external HTTP listener (verified via
 //   Phase 2 Spike — ctx.serverUrl is a phantom URL, ctx.client.fetch is
 //   bound to Server.Default().fetch() in-process). So Clawd cannot call
-//   opencode's REST API directly from outside the Bun process. Instead we
+//   mimocode's REST API directly from outside the Bun process. Instead we
 //   start a tiny Bun.serve() bridge here: Clawd POSTs decisions to the
 //   bridge, and the bridge calls ctx.client._client.post() — the same
-//   in-process Hono router that `opencode serve` would expose externally.
+//   in-process Hono router that `mimocode serve` would expose externally.
 //   A random 32-byte hex token gates the bridge endpoint since localhost
 //   TCP is visible to any process on the machine.
 
@@ -50,11 +50,11 @@ const AGENT_ID = "mimocode";
 const HOOK_SOURCE = "mimocode-plugin";
 
 // Process tree walk config — mirrors hooks/clawd-hook.js exactly, minus the
-// Claude-specific detection. See docs/plans/plan-opencode-integration.md Phase 4.
-// Spike confirmed (2026-04-05): plugin runs in-process with opencode, so walk
+// Claude-specific detection. See docs/plans/plan-mimocode-integration.md Phase 4.
+// Spike confirmed (2026-04-05): plugin runs in-process with mimocode, so walk
 // starts at process.pid. Observed chains on Windows:
-//   WT:         opencode.exe → node.exe → powershell.exe → windowsterminal.exe
-//   Antigravity: opencode.exe → node.exe → pwsh.exe → antigravity.exe(×2) → explorer.exe
+//   WT:         mimo.exe → node.exe → powershell.exe → windowsterminal.exe
+//   Antigravity: mimo.exe → node.exe → pwsh.exe → antigravity.exe(×2) → explorer.exe
 const TERMINAL_NAMES_WIN = new Set([
   "windowsterminal.exe", "cmd.exe", "powershell.exe", "pwsh.exe",
   "code.exe", "alacritty.exe", "wezterm-gui.exe", "mintty.exe",
@@ -79,7 +79,7 @@ const EDITOR_MAP_WIN = { "code.exe": "code", "cursor.exe": "cursor" };
 const EDITOR_MAP_MAC = { "code": "code", "cursor": "cursor" };
 const EDITOR_MAP_LINUX = { "code": "code", "cursor": "cursor", "code-insiders": "code" };
 
-// Per plugin-instance state (scoped to one opencode process).
+// Per plugin-instance state (scoped to one mimocode process).
 let _cachedPort = null;
 // Per-session last-state tracking. Keyed by sessionId so that subagent
 // sessions (spawned by the `task` tool) don't clobber the root session's
@@ -90,7 +90,7 @@ const _lastStatePerSession = new Map();
 // event so it stays fresh. Not used for state dedup.
 let _lastSeenSessionId = null;
 let _reqCounter = 0;
-// Phase 3: opencode subtasks are full child sessions (not subtask parts). When
+// Phase 3: mimocode subtasks are full child sessions (not subtask parts). When
 // session.created carries event.properties.info.parentID, Clawd treats the
 // child as background/headless work owned by its parent: no HUD/focus/fanout,
 // and child session.idle maps to SessionEnd instead of the root happy path.
@@ -115,11 +115,11 @@ let _tmuxClient = null;
 // POST so state.js can display path.basename(cwd) as the session menu label
 // (otherwise it falls back to the session_id prefix, e.g. "ses 2a..").
 let _cwd = "";
-// opencode HTTP server URL, captured at plugin init from ctx.serverUrl. Kept
+// mimocode HTTP server URL, captured at plugin init from ctx.serverUrl. Kept
 // for debug logging only — see Phase 2 Spike: TUI does not actually listen
 // on this URL. Replies go through _bridgeUrl instead.
 let _serverUrl = "";
-// Captured at plugin init — the opencode SDK client. Used by the reverse
+// Captured at plugin init — the mimocode SDK client. Used by the reverse
 // bridge to call in-process Hono routes (e.g. /permission/:id/reply).
 let _ctxClient = null;
 // Reverse bridge state. Set by startBridge() at plugin init. Clawd receives
@@ -129,11 +129,11 @@ let _bridgeTokenHex = "";
 let _bridgeTokenBuf = null;
 let _bridgeServer = null;
 
-// Debug log is reset on plugin init so each opencode startup gets a clean
+// Debug log is reset on plugin init so each mimocode startup gets a clean
 // file. message.part.updated ignores are filtered out at the event-handler
 // level to keep volume low, but we still write via a batched async flush
 // (libuv threadpool) so even a burst of MAP/SEND/POST lines from a single
-// event tick never blocks the opencode TUI main thread.
+// event tick never blocks the mimocode TUI main thread.
 const _debugBuffer = [];
 let _debugFlushing = false;
 function debugLog(msg) {
@@ -363,7 +363,7 @@ function postStateToClawd(body) {
 }
 
 // Fire-and-forget permission forward. Clawd decides allow/deny/always in its
-// bubble UI and — critically — replies to opencode's own REST API directly
+// bubble UI and — critically — replies to mimocode's own REST API directly
 // (POST ${server_url}permission/:request_id/reply). The plugin never waits.
 function postPermissionToClawd(body) {
   postToClawd("/permission", body, `PERM tool=${body.tool_name} req=${body.request_id}`);
@@ -408,7 +408,7 @@ function sendState(state, eventName, sessionId) {
   postStateToClawd(body);
 }
 
-// Translate an opencode event into a Clawd (state, eventName) pair, or null
+// Translate an mimocode event into a Clawd (state, eventName) pair, or null
 // if Clawd should ignore it. Event shape (from runtime dumps):
 //   { type: "session.status", properties: { sessionID, status: { type } } }
 //   { type: "message.part.updated", properties: { part: { type, tool, state: { status } } } }
@@ -478,7 +478,7 @@ function translateEvent(event) {
 }
 
 // Test-only internals. Attached to the default export at the bottom of this
-// file — NOT a named export. opencode's plugin loader runs getLegacyPlugins()
+// file — NOT a named export. mimocode's plugin loader runs getLegacyPlugins()
 // over Object.values(mod) and throws "Plugin export is not a function" on ANY
 // non-function module export, which silently kills the whole plugin. The module
 // must therefore expose exactly one export: the default function. See #413.
@@ -490,7 +490,7 @@ const __testInternals = {
   set _rootSessionId(v) { _rootSessionId = v; },
 };
 
-// Normalize ctx.serverUrl into a string with a trailing slash. opencode passes
+// Normalize ctx.serverUrl into a string with a trailing slash. mimocode passes
 // a URL object in practice but we coerce defensively in case future versions
 // hand us a plain string. Trailing slash lets Clawd concat cleanly:
 //   `${server_url}permission/${request_id}/reply`
@@ -501,7 +501,7 @@ function normalizeServerUrl(raw) {
 }
 
 // Handle v2 permission.asked event — see Phase 2 Spike in
-// docs/plans/plan-opencode-integration.md. The payload has no sessionID in its
+// docs/plans/plan-mimocode-integration.md. The payload has no sessionID in its
 // properties (only `id` = requestID), so we use _lastSeenSessionId (the most
 // recently seen session from state events) as a fallback, then _rootSessionId.
 // Phase 1 dedup/state machine logic does not run for permission events — they
@@ -542,8 +542,8 @@ function verifyBridgeToken(headerValue) {
 }
 
 // Handle POST /reply from Clawd. Reads { request_id, reply } and forwards to
-// the opencode in-process Hono router via ctx.client._client.post(). Return
-// 200 on success (opencode's own route returned 2xx), 4xx on auth/shape
+// the mimocode in-process Hono router via ctx.client._client.post(). Return
+// 200 on success (mimocode's own route returned 2xx), 4xx on auth/shape
 // errors, 502 if the upstream call itself throws.
 async function handleBridgeRequest(req) {
   const url = new URL(req.url);
@@ -572,8 +572,8 @@ async function handleBridgeRequest(req) {
   debugLog(`BRIDGE → mimocode permission reply requestId=${requestId} reply=${reply}`);
   try {
     // HeyApi v1 client.post() signature confirmed by reading
-    // @opencode-ai/sdk/dist/gen/sdk.gen.js — it takes { url, body, headers }
-    // and routes through the client.fetch that opencode bound to
+    // @mimo-ai/sdk/dist/gen/sdk.gen.js — it takes { url, body, headers }
+    // and routes through the client.fetch that mimocode bound to
     // Server.Default().fetch() at plugin init time. No real TCP here.
     const result = await _ctxClient._client.post({
       url: `/permission/${encodeURIComponent(requestId)}/reply`,
@@ -604,7 +604,7 @@ async function handleBridgeRequest(req) {
 }
 
 // Start the Bun.serve reverse bridge on a random localhost port. Called once
-// at plugin init. Survives the plugin's lifetime; opencode owns the process
+// at plugin init. Survives the plugin's lifetime; mimocode owns the process
 // so there's no explicit shutdown path — the server dies with the process.
 function startBridge() {
   if (typeof Bun === "undefined" || !Bun.serve) {
@@ -631,7 +631,7 @@ function startBridge() {
   }
 }
 
-// Plugin entrypoint (opencode loads this via default export).
+// Plugin entrypoint (mimocode loads this via default export).
 const plugin = async (ctx) => {
   resetDebugLog();
   _serverUrl = normalizeServerUrl(ctx && ctx.serverUrl);
@@ -660,7 +660,7 @@ const plugin = async (ctx) => {
         if (sid) _lastSeenSessionId = sid;
 
         // Phase 3 headless: on session.created, read parentID from
-        // event.properties.info.parentID (opencode SDK ≥1.15.13) and store
+        // event.properties.info.parentID (mimocode SDK ≥1.15.13) and store
         // in _sessionParentById. Child sessions get headless: true in
         // buildStateBody().
         if (event.type === "session.created" && sid) {
@@ -679,7 +679,7 @@ const plugin = async (ctx) => {
         }
 
         // Phase 2: permission.asked rides a parallel channel — forward to Clawd
-        // and skip state translation. Clawd replies directly to opencode's own
+        // and skip state translation. Clawd replies directly to mimocode's own
         // REST API, so we don't need to watch permission.replied here.
         if (event.type === "permission.asked") {
           handlePermissionAsked(event);
@@ -726,7 +726,7 @@ const plugin = async (ctx) => {
 
 // Expose test internals on the default-exported function rather than as a
 // separate named export — see the note on __testInternals and issue #413.
-// Object.values(mod) must contain only functions, or opencode's legacy plugin
+// Object.values(mod) must contain only functions, or mimocode's legacy plugin
 // loader throws "Plugin export is not a function" and the plugin never registers.
 // Non-enumerable: it's a private test backdoor, never part of the plugin surface.
 Object.defineProperty(plugin, "__test", { value: __testInternals });

@@ -10,7 +10,7 @@
 //   - Global scope (~/.config/mimocode/mimocode.jsonc) applies to every project
 //     the user opens, matching Gemini/Cursor install behavior.
 //   - opencode.ai/docs/plugins confirms Load Order starts with "global config".
-//     mimocode is an opencode-derived runtime and shares the same plugin loader.
+//     mimocode is a mimocode-derived runtime and shares the same plugin loader.
 
 const fs = require("fs");
 const path = require("path");
