@@ -1469,6 +1469,8 @@ function replyMimocodePermission({ bridgeUrl, bridgeToken, requestId, reply, too
   req.write(body);
   req.end();
 }
+
+function sendPermissionResponse(res, decisionOrBehavior, message, hookEventName = "PermissionRequest") {
   let decision;
   if (typeof decisionOrBehavior === "string") {
     decision = { behavior: decisionOrBehavior };
@@ -2002,7 +2004,6 @@ return {
   replyOpencodePermission,
   replyMimocodePermission,
 };
-
 };
 
 module.exports.registerPermissionIpc = registerPermissionIpc;
